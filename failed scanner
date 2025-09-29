@@ -1,0 +1,103 @@
+```pinescript
+//@version=5
+indicator("TheStrat Failed 2-Down/Up Multi-TF Scanner + Table", overlay=true, max_labels_count=500)
+
+// -------- Inputs --------
+tf1h       = input.bool(true, "Scan 1H")
+tf4h       = input.bool(true, "Scan 4H")
+tfDaily    = input.bool(true, "Scan Daily")
+tfWeekly   = input.bool(true, "Scan Weekly")
+tfMonthly  = input.bool(true, "Scan Monthly")
+
+// -------- Helper to fetch OHLC --------
+get_tf_series(sym, tf) =>
+    [o,h,l,c] = request.security(sym, tf, [open, high, low, close], lookahead = barmerge.lookahead_off)
+    [o,h,l,c]
+
+// -------- Detection per TheStrat --------
+detect_failed2(o,h,l,c) =>
+    // Failed 2-Down: candle goes 2-down, closes green, but doesn't take out prev high
+    failed2Down = (l[0] < l[1]) and (c[0] > o[0]) and (h[0] < h[1])
+    // Failed 2-Up: candle goes 2-up, closes red, but doesn't take out prev low
+    failed2Up   = (h[0] > h[1]) and (c[0] < o[0]) and (l[0] > l[1])
+    [failed2Down, failed2Up]
+
+// -------- Run per timeframe --------
+sym = syminfo.tickerid
+
+run_tf(tfname, enabled) =>
+    if not enabled
+        [false,false,na,na]
+    else
+        [o,h,l,c] = get_tf_series(sym, tfname)
+        [fd, fu]  = detect_failed2(o,h,l,c)
+        tstamp    = request.security(sym, tfname, time, lookahead=barmerge.lookahead_off)
+        price     = c[0]
+        [fd, fu, tstamp, price]
+
+// Run all timeframes
+[fd1, fu1, ts1, p1] = run_tf("60", tf1h)
+[fd4, fu4, ts4, p4] = run_tf("240", tf4h)
+[fdd, fud, tsd, pd] = run_tf("D", tfDaily)
+[fdw, fuw, tsw, pw] = run_tf("W", tfWeekly)
+[fdm, fum, tsm, pm] = run_tf("M", tfMonthly)
+
+// -------- Plot labels --------
+plotshape(fd1, title="F2D 1H", location=location.belowbar, style=shape.labelup, text="F2D 1H", color=color.green, textcolor=color.white)
+plotshape(fu1, title="F2U 1H", location=location.abovebar, style=shape.labeldown, text="F2U 1H", color=color.red, textcolor=color.white)
+plotshape(fd4, title="F2D 4H", location=location.belowbar, style=shape.labelup, text="F2D 4H", color=color.green, textcolor=color.white)
+plotshape(fu4, title="F2U 4H", location=location.abovebar, style=shape.labeldown, text="F2U 4H", color=color.red, textcolor=color.white)
+plotshape(fdd, title="F2D D", location=location.belowbar, style=shape.labelup, text="F2D D", color=color.green, textcolor=color.white)
+plotshape(fud, title="F2U D", location=location.abovebar, style=shape.labeldown, text="F2U D", color=color.red, textcolor=color.white)
+plotshape(fdw, title="F2D W", location=location.belowbar, style=shape.labelup, text="F2D W", color=color.green, textcolor=color.white)
+plotshape(fuw, title="F2U W", location=location.abovebar, style=shape.labeldown, text="F2U W", color=color.red, textcolor=color.white)
+plotshape(fdm, title="F2D M", location=location.belowbar, style=shape.labelup, text="F2D M", color=color.green, textcolor=color.white)
+plotshape(fum, title="F2U M", location=location.abovebar, style=shape.labeldown, text="F2U M", color=color.red, textcolor=color.white)
+
+// -------- Alerts --------
+alert_msg(sym, tf, pattern, ts, price) =>
+    '{"symbol":"'+sym+'","timeframe":"'+tf+'","pattern":"'+pattern+'","time":"'+tostring(timestamp("yyyy-MM-dd HH:mm", ts))+'","price":'+tostring(price)+'}'
+
+if tf1h
+    alertcondition(fd1, title="F2D_1H", message=alert_msg(sym,"1H","failed_2_down", ts1, p1))
+    alertcondition(fu1, title="F2U_1H", message=alert_msg(sym,"1H","failed_2_up", ts1, p1))
+if tf4h
+    alertcondition(fd4, title="F2D_4H", message=alert_msg(sym,"4H","failed_2_down", ts4, p4))
+    alertcondition(fu4, title="F2U_4H", message=alert_msg(sym,"4H","failed_2_up", ts4, p4))
+if tfDaily
+    alertcondition(fdd, title="F2D_D", message=alert_msg(sym,"D","failed_2_down", tsd, pd))
+    alertcondition(fud, title="F2U_D", message=alert_msg(sym,"D","failed_2_up", tsd, pd))
+if tfWeekly
+    alertcondition(fdw, title="F2D_W", message=alert_msg(sym,"W","failed_2_down", tsw, pw))
+    alertcondition(fuw, title="F2U_W", message=alert_msg(sym,"W","failed_2_up", tsw, pw))
+if tfMonthly
+    alertcondition(fdm, title="F2D_M", message=alert_msg(sym,"M","failed_2_down", tsm, pm))
+    alertcondition(fum, title="F2U_M", message=alert_msg(sym,"M","failed_2_up", tsm, pm))
+
+// -------- Table UI --------
+var tbl = table.new(position.top_left, 5, 6, border_width=1)
+
+if barstate.islast
+    table.cell(tbl, 0, 0, "TF", bgcolor=color.black, text_color=color.white)
+    table.cell(tbl, 1, 0, "Last Pattern", bgcolor=color.black, text_color=color.white)
+    table.cell(tbl, 2, 0, "Price", bgcolor=color.black, text_color=color.white)
+    table.cell(tbl, 3, 0, "Time", bgcolor=color.black, text_color=color.white)
+    table.cell(tbl, 4, 0, "Status", bgcolor=color.black, text_color=color.white)
+
+    showRow(tf, fd, fu, ts, price, row) =>
+        pat = fd ? "F2D" : fu ? "F2U" : "-"
+        clr = fd ? color.green : fu ? color.red : color.gray
+        pr  = na(price) ? "-" : str.tostring(price, format.mintick)
+        tm  = na(ts) ? "-" : str.tostring(timestamp("yyyy-MM-dd HH:mm", ts))
+        stat = fd or fu ? "Triggered" : "Waiting"
+        table.cell(tbl, 0, row, tf, bgcolor=color.black, text_color=color.white)
+        table.cell(tbl, 1, row, pat, bgcolor=clr, text_color=color.white)
+        table.cell(tbl, 2, row, pr, bgcolor=color.black, text_color=color.white)
+        table.cell(tbl, 3, row, tm, bgcolor=color.black, text_color=color.white)
+        table.cell(tbl, 4, row, stat, bgcolor=color.black, text_color=color.white)
+
+    showRow("1H", fd1, fu1, ts1, p1, 1)
+    showRow("4H", fd4, fu4, ts4, p4, 2)
+    showRow("D",  fdd, fud, tsd, pd, 3)
+    showRow("W",  fdw, fuw, tsw, pw, 4)
+    showRow("M",  fdm, fum, tsm, pm, 5)
