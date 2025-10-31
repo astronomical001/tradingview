@@ -97,19 +97,21 @@ var int[] prevLowTime = array.new_int(array.size(timeframeList), na)
 // === Helper Procedures ===
 updateBox(int idx) =>
     bx = array.get(poolBox, idx)
-    if not na(bx)
-        box.set_top(bx, array.get(poolUpper, idx))
-        box.set_bottom(bx, array.get(poolLower, idx))
-        box.set_right(bx, time)
+    if na(bx)
+        return
+    box.set_top(bx, array.get(poolUpper, idx))
+    box.set_bottom(bx, array.get(poolLower, idx))
+    box.set_right(bx, time)
 
 updateLabel(int idx) =>
     lbl = array.get(poolLabel, idx)
-    if not na(lbl)
-        text = formatLabel(array.get(poolTf, idx), array.get(poolIsHigh, idx), array.get(poolTouches, idx), array.get(poolPrice, idx), array.get(poolTolerance, idx), array.get(poolScore, idx))
-        price = array.get(poolIsHigh, idx) ? array.get(poolUpper, idx) : array.get(poolLower, idx)
-        label.set_text(lbl, text)
-        label.set_y(lbl, price)
-        label.set_x(lbl, array.get(poolLastTime, idx))
+    if na(lbl)
+        return
+    string text = formatLabel(array.get(poolTf, idx), array.get(poolIsHigh, idx), array.get(poolTouches, idx), array.get(poolPrice, idx), array.get(poolTolerance, idx), array.get(poolScore, idx))
+    float price = array.get(poolIsHigh, idx) ? array.get(poolUpper, idx) : array.get(poolLower, idx)
+    label.set_text(lbl, text)
+    label.set_y(lbl, price)
+    label.set_x(lbl, array.get(poolLastTime, idx))
 
 deactivatePool(int idx) =>
     array.set(poolActive, idx, false)
