@@ -1,0 +1,316 @@
+//@version=5
+indicator("Liquidity Pool Detector", overlay=true, max_lines_count=500, max_boxes_count=500, max_labels_count=500)
+
+// === Inputs ===
+inputGroupTimeframes = "Timeframes"
+includeChartTf = input.bool(true, "Include Chart Timeframe", group=inputGroupTimeframes)
+tf1 = input.timeframe("60", "Timeframe 1", group=inputGroupTimeframes)
+enableTf1 = input.bool(true, "Enable TF1", group=inputGroupTimeframes)
+tf2 = input.timeframe("240", "Timeframe 2", group=inputGroupTimeframes)
+enableTf2 = input.bool(true, "Enable TF2", group=inputGroupTimeframes)
+tf3 = input.timeframe("D", "Timeframe 3", group=inputGroupTimeframes)
+enableTf3 = input.bool(true, "Enable TF3", group=inputGroupTimeframes)
+tf4 = input.timeframe("W", "Timeframe 4", group=inputGroupTimeframes)
+enableTf4 = input.bool(false, "Enable TF4", group=inputGroupTimeframes)
+
+inputGroupDetection = "Detection Settings"
+swingLeft = input.int(3, "Swing Left", minval=1, group=inputGroupDetection)
+swingRight = input.int(3, "Swing Right", minval=1, group=inputGroupDetection)
+lookbackBars = input.int(400, "Lookback Bars Per TF", minval=50, maxval=2000, group=inputGroupDetection)
+maxPoolsPerSide = input.int(6, "Max Pools Per Side & TF", minval=1, maxval=15, group=inputGroupDetection)
+
+inputGroupTolerance = "Tolerance Model"
+tolMode = input.string("ticks", "Tolerance Mode", options=["ticks", "percent", "atr", "hybrid"], group=inputGroupTolerance)
+tickMultiplier = input.float(2.0, "Tick Multiplier", minval=0.0, group=inputGroupTolerance)
+percentTolerance = input.float(0.05, "Percent Tolerance (%)", minval=0.0, group=inputGroupTolerance)
+atrLength = input.int(14, "ATR Length", minval=1, group=inputGroupTolerance)
+atrMultiplier = input.float(0.2, "ATR Multiplier", minval=0.0, group=inputGroupTolerance)
+
+inputGroupAlerts = "Alerts"
+enableApproachAlert = input.bool(true, "Approach Alert", group=inputGroupAlerts)
+enableSweepAlert = input.bool(true, "Sweep Alert", group=inputGroupAlerts)
+alertMinTouches = input.int(2, "Alert Min Touches", minval=2, group=inputGroupAlerts)
+
+inputGroupStyle = "Styling"
+colorEqualHigh = input.color(color.new(color.red, 70), "Equal High Zone", group=inputGroupStyle)
+colorEqualLow = input.color(color.new(color.green, 70), "Equal Low Zone", group=inputGroupStyle)
+colorLabelHigh = input.color(color.new(color.red, 0), "High Label", group=inputGroupStyle)
+colorLabelLow = input.color(color.new(color.green, 0), "Low Label", group=inputGroupStyle)
+showTable = input.bool(true, "Show Summary Table", group=inputGroupStyle)
+showDebug = input.bool(false, "Show Debug Messages", group=inputGroupStyle)
+
+// === Utility Functions ===
+getTimeframes() =>
+    var string[] tfs = array.new_string()
+    if barstate.isfirst
+        if includeChartTf
+            array.push(tfs, timeframe.period)
+        if enableTf1 and str.length(tf1) > 0
+            array.push(tfs, tf1)
+        if enableTf2 and str.length(tf2) > 0
+            array.push(tfs, tf2)
+        if enableTf3 and str.length(tf3) > 0
+            array.push(tfs, tf3)
+        if enableTf4 and str.length(tf4) > 0
+            array.push(tfs, tf4)
+    tfs
+
+calcTolerance(float closeValue, float atrValue) =>
+    float tickTol = syminfo.mintick * tickMultiplier
+    float percentTol = closeValue * (percentTolerance * 0.01)
+    float atrTol = atrValue * atrMultiplier
+    float tol = switch tolMode
+        "ticks" => tickTol
+        "percent" => percentTol
+        "atr" => atrTol
+        => math.max(percentTol, atrTol)
+    math.max(tol, tickTol)
+
+formatLabel(string tf, bool isHigh, int touches, float price, float tol, float score) =>
+    dir = isHigh ? "EQH" : "EQL"
+    str.format("{0} {1}\nTouches: {2}\nMid: {3}\n±Tol: {4}", tf, dir, touches, str.tostring(price, format.mintick), str.tostring(tol, format.mintick))
+
+// === Pool Storage ===
+var string[] poolTf = array.new_string()
+var bool[] poolIsHigh = array.new_bool()
+var float[] poolPrice = array.new_float()
+var float[] poolUpper = array.new_float()
+var float[] poolLower = array.new_float()
+var int[] poolTouches = array.new_int()
+var float[] poolScore = array.new_float()
+var int[] poolFirstTime = array.new_int()
+var int[] poolLastTime = array.new_int()
+var bool[] poolActive = array.new_bool()
+var box[] poolBox = array.new_box()
+var label[] poolLabel = array.new_label()
+var float[] poolTolerance = array.new_float()
+var int[] poolLastAlertTimeApproach = array.new_int()
+var int[] poolLastAlertTimeSweep = array.new_int()
+
+// Previous swing storage per timeframe
+var string[] timeframeList = getTimeframes()
+var float[] prevHighPrice = array.new_float(array.size(timeframeList), na)
+var int[] prevHighTime = array.new_int(array.size(timeframeList), na)
+var float[] prevLowPrice = array.new_float(array.size(timeframeList), na)
+var int[] prevLowTime = array.new_int(array.size(timeframeList), na)
+
+// === Helper Procedures ===
+updateBox(int idx) =>
+    bx = array.get(poolBox, idx)
+    if na(bx)
+        ()
+    else
+        box.set_top(bx, array.get(poolUpper, idx))
+        box.set_bottom(bx, array.get(poolLower, idx))
+        box.set_right(bx, time)
+
+updateLabel(int idx) =>
+    lbl = array.get(poolLabel, idx)
+    if na(lbl)
+        ()
+    else
+        text = formatLabel(array.get(poolTf, idx), array.get(poolIsHigh, idx), array.get(poolTouches, idx), array.get(poolPrice, idx), array.get(poolTolerance, idx), array.get(poolScore, idx))
+        price = array.get(poolIsHigh, idx) ? array.get(poolUpper, idx) : array.get(poolLower, idx)
+        label.set_text(lbl, text)
+        label.set_y(lbl, price)
+        label.set_x(lbl, array.get(poolLastTime, idx))
+
+deactivatePool(int idx) =>
+    array.set(poolActive, idx, false)
+    bx = array.get(poolBox, idx)
+    if not na(bx)
+        box.delete(bx)
+        array.set(poolBox, idx, na)
+    lbl = array.get(poolLabel, idx)
+    if not na(lbl)
+        label.delete(lbl)
+        array.set(poolLabel, idx, na)
+
+countActive(string tf, bool isHigh) =>
+    cnt = 0
+    for i = 0 to array.size(poolTf) - 1
+        if array.get(poolActive, i) and array.get(poolTf, i) == tf and array.get(poolIsHigh, i) == isHigh
+            cnt += 1
+    cnt
+
+trimPools(string tf, bool isHigh) =>
+    while countActive(tf, isHigh) > maxPoolsPerSide
+        oldestIdx = na
+        oldestTime = na
+        for i = 0 to array.size(poolTf) - 1
+            if array.get(poolActive, i) and array.get(poolTf, i) == tf and array.get(poolIsHigh, i) == isHigh
+                lastTime = array.get(poolLastTime, i)
+                if na(oldestTime) or lastTime < oldestTime
+                    oldestTime := lastTime
+                    oldestIdx := i
+        if not na(oldestIdx)
+            deactivatePool(oldestIdx)
+        else
+            break
+
+updateExistingPool(string tf, bool isHigh, float price, int pivotTime, float tolerance) =>
+    updated = false
+    for i = 0 to array.size(poolTf) - 1
+        if array.get(poolActive, i) and array.get(poolTf, i) == tf and array.get(poolIsHigh, i) == isHigh
+            center = array.get(poolPrice, i)
+            tol = math.max(array.get(poolTolerance, i), tolerance)
+            if math.abs(center - price) <= tol
+                touches = array.get(poolTouches, i) + 1
+                // Weighted average for center
+                newCenter = (center * (touches - 1) + price) / touches
+                upper = math.max(array.get(poolUpper, i), price + tol)
+                lower = math.min(array.get(poolLower, i), price - tol)
+                score = touches + math.min(50.0, (timenow - array.get(poolFirstTime, i)) / 1e6)
+                array.set(poolTouches, i, touches)
+                array.set(poolPrice, i, newCenter)
+                array.set(poolUpper, i, upper)
+                array.set(poolLower, i, lower)
+                array.set(poolScore, i, score)
+                array.set(poolTolerance, i, tol)
+                array.set(poolLastTime, i, pivotTime)
+                updateBox(i)
+                updateLabel(i)
+                updated := true
+    updated
+
+createPool(string tf, bool isHigh, float priceA, int timeA, float priceB, int timeB, float tolerance) =>
+    center = (priceA + priceB) / 2.0
+    upper = math.max(priceA, priceB) + tolerance
+    lower = math.min(priceA, priceB) - tolerance
+    firstTime = math.min(timeA, timeB)
+    lastTime = math.max(timeA, timeB)
+    touches = 2
+    score = 2.0
+    colZone = isHigh ? colorEqualHigh : colorEqualLow
+    colBorder = color.new(colZone, 0)
+    bx = box.new(firstTime, upper, time, lower, xloc=xloc.bar_time, bgcolor=colZone, border_color=colBorder)
+    box.set_extend(bx, extend.right)
+    lblColor = isHigh ? colorLabelHigh : colorLabelLow
+    lblStyle = isHigh ? label.style_label_down : label.style_label_up
+    lbl = label.new(lastTime, isHigh ? upper : lower, formatLabel(tf, isHigh, touches, center, tolerance, score), xloc=xloc.bar_time, color=lblColor, textcolor=color.white, style=lblStyle)
+    array.push(poolTf, tf)
+    array.push(poolIsHigh, isHigh)
+    array.push(poolPrice, center)
+    array.push(poolUpper, upper)
+    array.push(poolLower, lower)
+    array.push(poolTouches, touches)
+    array.push(poolScore, score)
+    array.push(poolFirstTime, firstTime)
+    array.push(poolLastTime, lastTime)
+    array.push(poolActive, true)
+    array.push(poolBox, bx)
+    array.push(poolLabel, lbl)
+    array.push(poolTolerance, tolerance)
+    array.push(poolLastAlertTimeApproach, na)
+    array.push(poolLastAlertTimeSweep, na)
+    trimPools(tf, isHigh)
+
+// === Core Processing ===
+approachSignal = false
+sweepSignal = false
+alertMessageApproach = ""
+alertMessageSweep = ""
+
+for idx = 0 to array.size(timeframeList) - 1
+    tf = array.get(timeframeList, idx)
+    closeSeries = request.security(syminfo.tickerid, tf, close, lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_on)
+    atrSeries = request.security(syminfo.tickerid, tf, ta.atr(atrLength), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_on)
+    tolerance = calcTolerance(closeSeries, atrSeries)
+
+    pivotHigh = request.security(syminfo.tickerid, tf, ta.pivothigh(high, swingLeft, swingRight), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_on)
+    pivotHighTime = request.security(syminfo.tickerid, tf, time[swingRight], lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_on)
+    pivotLow = request.security(syminfo.tickerid, tf, ta.pivotlow(low, swingLeft, swingRight), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_on)
+    pivotLowTime = request.security(syminfo.tickerid, tf, time[swingRight], lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_on)
+
+    if not na(pivotHigh)
+        updated = updateExistingPool(tf, true, pivotHigh, pivotHighTime, tolerance)
+        prevPrice = array.get(prevHighPrice, idx)
+        prevTime = array.get(prevHighTime, idx)
+        if not updated and not na(prevPrice) and math.abs(prevPrice - pivotHigh) <= tolerance
+            createPool(tf, true, prevPrice, prevTime, pivotHigh, pivotHighTime, tolerance)
+        array.set(prevHighPrice, idx, pivotHigh)
+        array.set(prevHighTime, idx, pivotHighTime)
+
+    if not na(pivotLow)
+        updatedLow = updateExistingPool(tf, false, pivotLow, pivotLowTime, tolerance)
+        prevPriceLow = array.get(prevLowPrice, idx)
+        prevTimeLow = array.get(prevLowTime, idx)
+        if not updatedLow and not na(prevPriceLow) and math.abs(prevPriceLow - pivotLow) <= tolerance
+            createPool(tf, false, prevPriceLow, prevTimeLow, pivotLow, pivotLowTime, tolerance)
+        array.set(prevLowPrice, idx, pivotLow)
+        array.set(prevLowTime, idx, pivotLowTime)
+
+// === Pool Maintenance ===
+for i = 0 to array.size(poolTf) - 1
+    if array.get(poolActive, i)
+        isHigh = array.get(poolIsHigh, i)
+        upper = array.get(poolUpper, i)
+        lower = array.get(poolLower, i)
+        tol = array.get(poolTolerance, i)
+        touches = array.get(poolTouches, i)
+        tf = array.get(poolTf, i)
+        // Extend boxes and keep visuals fresh
+        updateBox(i)
+        updateLabel(i)
+
+        // Age-based pruning
+        tfSeconds = timeframe.in_seconds(tf)
+        maxAgeMs = tfSeconds > 0 ? lookbackBars * tfSeconds * 1000 : na
+
+        // Invalidation
+        ageExceeded = not na(maxAgeMs) and (time - array.get(poolFirstTime, i)) > maxAgeMs
+        invalidated = ageExceeded or (isHigh and close > upper + tol) or (not isHigh and close < lower - tol)
+        if invalidated
+            deactivatePool(i)
+        else
+            // Alerts
+            if touches >= alertMinTouches
+                center = array.get(poolPrice, i)
+                approach = math.abs(close - center) <= tol
+                sweep = (isHigh and high > upper and close < center) or (not isHigh and low < lower and close > center)
+                lastApproach = array.get(poolLastAlertTimeApproach, i)
+                lastSweep = array.get(poolLastAlertTimeSweep, i)
+                if enableApproachAlert and approach and (na(lastApproach) or time > lastApproach)
+                    alertMessageApproach := str.format("Liquidity approach on {0} {1} at {2}", tf, isHigh ? "EQH" : "EQL", str.tostring(center, format.mintick))
+                    approachSignal := true
+                    array.set(poolLastAlertTimeApproach, i, time)
+                if enableSweepAlert and sweep and (na(lastSweep) or time > lastSweep)
+                    alertMessageSweep := str.format("Liquidity sweep on {0} {1} at {2}", tf, isHigh ? "EQH" : "EQL", str.tostring(center, format.mintick))
+                    sweepSignal := true
+                    array.set(poolLastAlertTimeSweep, i, time)
+
+// Fire alerts with dynamic messages
+if approachSignal
+    alert(alertMessageApproach, alert.freq_once_per_bar_close)
+if sweepSignal
+    alert(alertMessageSweep, alert.freq_once_per_bar_close)
+
+// === Summary Table ===
+var table summaryTbl = na
+if showTable
+    if na(summaryTbl)
+        summaryTbl := table.new(position.top_right, 5, max(2, array.size(timeframeList) + 1), border_width=1)
+    if barstate.islast
+        table.cell(summaryTbl, 0, 0, "TF", bgcolor=color.black, text_color=color.white)
+        table.cell(summaryTbl, 1, 0, "Type", bgcolor=color.black, text_color=color.white)
+        table.cell(summaryTbl, 2, 0, "Touches", bgcolor=color.black, text_color=color.white)
+        table.cell(summaryTbl, 3, 0, "Price", bgcolor=color.black, text_color=color.white)
+        table.cell(summaryTbl, 4, 0, "Age", bgcolor=color.black, text_color=color.white)
+        row = 1
+        for idx = 0 to array.size(poolTf) - 1
+            if array.get(poolActive, idx) and row < table.get_height(summaryTbl)
+                tf = array.get(poolTf, idx)
+                typeLbl = array.get(poolIsHigh, idx) ? "EQH" : "EQL"
+                touches = array.get(poolTouches, idx)
+                price = array.get(poolPrice, idx)
+                ageMinutes = (time - array.get(poolFirstTime, idx)) / 60000
+                table.cell(summaryTbl, 0, row, tf)
+                table.cell(summaryTbl, 1, row, typeLbl)
+                table.cell(summaryTbl, 2, row, str.tostring(touches))
+                table.cell(summaryTbl, 3, row, str.tostring(price, format.mintick))
+                table.cell(summaryTbl, 4, row, str.tostring(ageMinutes, format.mintick) + "m")
+                row += 1
+
+// === Debugging ===
+if showDebug and barstate.islast
+    label.new(time, high, "Pools: " + str.tostring(array.size(poolTf)), color=color.new(color.gray, 80), textcolor=color.white, style=label.style_label_left)
